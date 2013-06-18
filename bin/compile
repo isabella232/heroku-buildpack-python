@@ -4,6 +4,62 @@
 #
 #     $ bin/compile <build-dir> <cache-dir>
 
+# Syntax sugar.
+indent () {
+  RE="s/^/       /"
+  [ $(uname) == "Darwin" ] && sed -l "$RE" || sed -u "$RE"
+}
+
+puts () {
+  printf -- "$1 "
+  shift 1
+
+  if [ -n "$3" ]; then
+    printf -- "\033[$1m[$2] \033[0m"
+    shift 1
+  fi
+
+  shift 1
+
+  echo "$@"
+}
+
+pipe-step () {
+  if [ ! -t 0 ]; then
+    while read data; do
+      if [ ! -z "$data" ]; then
+        if [ -n "$1" ]; then
+          puts-step $1 "$data"
+        else
+          puts-step "$data"
+        fi
+      fi
+    done
+  fi
+}
+
+pipe-warn () {
+  if [ ! -t 0 ]; then
+    while read data; do
+      if [ ! -z "$data" ]; then
+        if [ -n "$1" ]; then
+          puts-warn $1 "$data"
+        else
+          puts-warn "$data"
+        fi
+      fi
+    done
+  fi
+}
+
+puts-step () {
+  puts "----->" "32" "$@"
+}
+
+puts-warn () {
+  puts "!     " "31" "$@"
+}
+
 
 # Fail fast and fail hard.
 set -eo pipefail
