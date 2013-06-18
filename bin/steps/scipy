@@ -53,7 +53,7 @@ if (grep -iq -e "numpy" -e "scipy" -e "scikit.learn" requirements.txt) then
   # Copy vendor dir to virtualenv so we can delete the vendor dir after caching.
   # Cache is just restored from cached copy of vendor dir.
   cd $OLDDIR
-  cp -Rn $VENDOR_DIR/* $VIRTUALENV_LOC/
+  cp -Rn $VENDOR_DIR/*/* $VIRTUALENV_LOC/
 
   # Stuff that helps building with pip.
   export LIBRARY_PATH=$VIRTUALENV_LOC/lib:$VIRTUALENV_LOC/lib/atlas-base/$VIRTUALENV_LOC/lib/atlas-base/atlas:$LIBRARY_PATH
