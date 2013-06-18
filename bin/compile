@@ -92,9 +92,9 @@ puts-warn () {
   puts "!     " "31" "$@"
 }
 
-virtualenv () {
-  python "$ROOT_DIR/vendor/virtualenv-1.7/virtualenv.py" "$@"
-}
+#virtualenv () {
+#  python "$ROOT_DIR/vendor/virtualenv-1.7/virtualenv.py" "$@"
+#}
 
 ##############################################
 # Front matter.                              #
