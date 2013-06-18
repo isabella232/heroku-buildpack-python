@@ -20,7 +20,7 @@ ARCHIVES=(
 # Package names in requirements.txt.
 REQS=(
   "numpy"
-  "scipy"
+  "numpy"
 )
 
 # Recommend copying each package to your own host.
