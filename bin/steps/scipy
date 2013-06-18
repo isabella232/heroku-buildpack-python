@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+
+# This buildpack step is based on https://github.com/heroku/heroku-buildpack-python
+# and https://github.com/wyn/heroku-buildpack-python.
+
+NAMES=("dependencies" "scipy")
+
+# Evidence that the packages exist.
+CHECKS=(
+  "lib/atlas-base"
+  "lib/python2.7/site-packages/scipy"
+)
+
+# Tarball names.
+ARCHIVES=(
+  "deps.tar.gz"
+  "npspskip.tar.gz"
+)
+
+# Package names in requirements.txt.
+REQS=(
+  "numpy"
+  "scipy"
+)
+
+# Recommend copying each package to your own host.
+URL_PREFIX="https://lyftdata-buildpack-binaries.s3.amazonaws.com/python/scipy/"
+
+if (grep -iq -e "numpy" -e "scipy" -e "scikit.learn" requirements.txt) then
+  OLDDIR=`pwd`
+  cd $VENDOR_DIR
+
+  for ((i=0;i<${#NAMES[@]};i++)); do
+    PNAME=${NAMES[$i]}
+    PCHECK=${CHECKS[$i]}
+    PARCHIVE=${ARCHIVES[$i]}
+    PREQ=${REQS[$i]}
+
+    if (grep -iq -e "$PREQ" $BUILD_DIR/requirements.txt) then
+      if [ ! -e "$PCHECK" ]; then
+        puts-step $PNAME 'Downloading.'
+        curl -s -o $PARCHIVE $URL_PREFIX$PARCHIVE 2>&1 >/dev/null | pipe-warn $PNAME
+        puts-step $PNAME 'Unarchiving.'
+        tar xfvz $PARCHIVE 2>&1 >/dev/null | pipe-warn $PNAME
+        puts-step $PNAME 'Cleaning up.'
+        rm -rf $PARCHIVE 2>&1 >/dev/null | pipe-warn $PNAME
+      else
+        puts-step $PNAME 'Using cached version.'
+      fi
+    fi
+  done
+
+  # Copy vendor dir to virtualenv so we can delete the vendor dir after caching.
+  # Cache is just restored from cached copy of vendor dir.
+  cd $OLDDIR
+  cp -Rn $VENDOR_DIR/* $VIRTUALENV_LOC/
+
+  # Stuff that helps building with pip.
+  export LIBRARY_PATH=$VIRTUALENV_LOC/lib:$VIRTUALENV_LOC/lib/atlas-base/$VIRTUALENV_LOC/lib/atlas-base/atlas:$LIBRARY_PATH
+  export LD_LIBRARY_PATH=$VIRTUALENV_LOC/lib:$VIRTUALENV_LOC/lib/atlas-base/$VIRTUALENV_LOC/lib/atlas-base/atlas:$LD_LIBRARY_PATH
+  export LAPACK=$VIRTUALENV_LOC/lib/atlas-base/atlas/liblapack.a
+  export ATLAS=$VIRTUALENV_LOC/lib/atlas-base/libatlas.a
+  export BLAS=$VIRTUALENV_LOC/lib/atlas-base/atlas/libblas.a
+fi
