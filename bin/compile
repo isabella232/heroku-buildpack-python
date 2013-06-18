@@ -157,6 +157,7 @@ fi
 
 set +e
 
+echo $PATH
 puts-step "Creating virtualenv ($(virtualenv --version))."
 
 if [ -e $VIRTUALENV_LOC ]; then
@@ -194,7 +195,9 @@ source $VIRTUALENV_LOC/bin/activate
 # every push. Otherwise, we won't be able to
 # find pip.
 
+echo $PATH
 export PATH=$PWD/$VIRTUALENV_LOC/bin:`echo $PATH | awk -v RS=: -v ORS=: '/tmp/ {next} {print}' | sed 's/:*$//'`
+echo $PATH
 
 
 ##############################################
