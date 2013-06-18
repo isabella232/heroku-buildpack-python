@@ -1,8 +1,40 @@
 #!/usr/bin/env bash
 
-# Usage:
-#
-#     $ bin/compile <build-dir> <cache-dir>
+# This buildpack step is based on https://github.com/heroku/heroku-buildpack-python
+# and https://github.com/wyn/heroku-buildpack-python, slightly modified for my own
+# nefarious purposes for scikits.audiolab / consistency with heroku's buildpack
+# look and feel. If you're just looking for np/scipy use, I recommend
+# https://github.com/wyn/heroku-buildpack-python.
+
+set -eo pipefail
+
+# Paths.
+BIN_DIR=$(cd $(dirname $0); pwd)
+ROOT_DIR=$(dirname $BIN_DIR)
+BUILD_DIR=$1
+CACHE_DIR=$2
+VENDOR_DIR=".heroku/vendor"
+
+# The detected application type (`Python`|`Python/Django`).
+NAME=$($BIN_DIR/detect $BUILD_DIR)
+
+# Where to store the Pip download cache.
+CACHED_DIRS=".heroku"
+PIP_DOWNLOAD_CACHE=${PIP_DOWNLOAD_CACHE:-$CACHE_DIR/pip_downloads}
+
+# Static configurations for virtualenv caches.
+LEGACY_VIRTUALENV_LOC="."
+MODERN_VIRTUALENV_LOC=".heroku/venv"
+LEGACY_VIRTUALENV_DIRS="bin include lib"
+LEGACY_VIRTUALENV_TRIGGER="lib/python2.7"
+
+# Sanitizing environment variables.
+unset GIT_DIR
+unset PYTHON_HOME
+unset PYTHONPATH
+
+export PIP_DOWNLOAD_CACHE
+export BUILD_DIR
 
 # Syntax sugar.
 indent () {
@@ -60,68 +92,16 @@ puts-warn () {
   puts "!     " "31" "$@"
 }
 
+virtualenv () {
+  python "$ROOT_DIR/vendor/virtualenv-1.7/virtualenv.py" "$@"
+}
 
-# Fail fast and fail hard.
-set -eo pipefail
-
-# Prepend proper path for virtualenv hackery. This will be deprecated soon.
-export PATH=:/usr/local/bin:$PATH
-
-# Paths.
-BIN_DIR=$(cd $(dirname $0); pwd) # absolute path
-ROOT_DIR=$(dirname $BIN_DIR)
-BUILD_DIR=$1
-CACHE_DIR=$2
-
-CACHED_DIRS=".heroku"
-
-# Static configurations for virtualenv caches.
-VIRTUALENV_LOC=".heroku/venv"
-LEGACY_TRIGGER="lib/python2.7"
-PROFILE_PATH="$BUILD_DIR/.profile.d/python.sh"
-
-# Python version. This will be used in the future to specify custom Pythons.
-DEFAULT_PYTHON_VERSION="python-2.7.4"
-PYTHON_EXE="/app/.heroku/python/bin/python"
-PIP_VERSION="1.3.1"
-DISTRIBUTE_VERSION="0.6.36"
-
-# Sanitizing environment variables.
-unset GIT_DIR PYTHONHOME PYTHONPATH LD_LIBRARY_PATH LIBRARY_PATH
-
-# We'll need to send these statics to other scripts we `source`.
-export BUILD_DIR CACHE_DIR BIN_DIR PROFILE_PATH
-
-# Syntax sugar.
-source $BIN_DIR/utils
-
-# Directory Hacks for path consistiency.
-APP_DIR='/app'
-TMP_APP_DIR=$CACHE_DIR/tmp_app_dir
-
-# Copy Anvil app dir to temporary storage...
-mkdir -p $TMP_APP_DIR
-deep-mv $APP_DIR $TMP_APP_DIR
-
-# Copy Application code in.
-deep-mv $BUILD_DIR $APP_DIR
-
-# Set new context.
-ORIG_BUILD_DIR=$BUILD_DIR
-BUILD_DIR=$APP_DIR
-
-# Prepend proper path buildpack use.
-export PATH=$BUILD_DIR/.heroku/python/bin:$PATH
-export PYTHONUNBUFFERED=1
-export LANG=en_US.UTF-8
-export LIBRARY_PATH=/app/.heroku/vendor/lib
-export LD_LIBRARY_PATH=/app/.heroku/vendor/lib
+##############################################
+# Front matter.                              #
+##############################################
 
 # Switch to the repo's context.
 cd $BUILD_DIR
-
-# Experimental pre_compile hook.
-source $BIN_DIR/steps/hooks/pre_compile
 
 # If no requirements given, assume `setup.py develop`.
 if [ ! -f requirements.txt ]; then
@@ -129,126 +109,152 @@ if [ ! -f requirements.txt ]; then
   echo "-e ." > requirements.txt
 fi
 
-# If no runtime given, assume default version.
-if [ ! -f runtime.txt ]; then
-  puts-step "No runtime.txt provided; assuming $DEFAULT_PYTHON_VERSION."
-  echo $DEFAULT_PYTHON_VERSION > runtime.txt
-fi
-
-# ### The Cache
+# Cache / heroku folder.
 mkdir -p $CACHE_DIR
+mkdir -p .heroku
+mkdir -p $VENDOR_DIR
 
-# Purge "old-style" virtualenvs.
-[ -d $CACHE_DIR/$LEGACY_TRIGGER ] && rm -fr $CACHE_DIR/.heroku/bin $CACHE_DIR/.heroku/lib $CACHE_DIR/.heroku/include
-[ -d $CACHE_DIR/$VIRTUALENV_LOC ] && rm -fr $CACHE_DIR/.heroku/venv $CACHE_DIR/.heroku/src
+# Nice defaults.
+LEGACY_VIRTUALENV=false
+VIRTUALENV_LOC=$MODERN_VIRTUALENV_LOC
 
-# Restore old artifacts from the cache.
-for dir in $CACHED_DIRS; do
-  cp -R $CACHE_DIR/$dir . &> /dev/null || true
-done
+# Support "old-style" virtualenvs.
+if [ -d $CACHE_DIR/$LEGACY_VIRTUALENV_TRIGGER ]; then
+  LEGACY_VIRTUALENV=true
+  VIRTUALENV_LOC=$LEGACY_VIRTUALENV_LOC
+  CACHED_DIRS=$LEGACY_VIRTUALENV_DIRS
 
-set +e
-# Create set-aside `.heroku` folder.
-mkdir .heroku &> /dev/null
-set -e
+  # Warn for a checked-in virtualenv.
+  if [ -d "lib" ] || [ -d "bin" ]; then
+    puts-warn "You have a virtualenv checked in. You should ignore the appropriate paths in your repo. See http://devcenter.heroku.com/articles/gitignore for more info."
+  fi
 
-mkdir -p $(dirname $PROFILE_PATH)
-
-set +e
-PYTHON_VERSION=$(cat runtime.txt)
-
-# Install Python.
-if [ -f .heroku/python-version ]; then
-  if [ ! $(cat .heroku/python-version) = $PYTHON_VERSION ]; then
-    puts-step "Found $(cat .heroku/python-version), removing."
-    rm -fr .heroku/python
-  else
-    SKIP_INSTALL=1
+  # Reject a conflicting checked-in virtualenv.
+  if [ -f "lib/python2.7" ]; then
+    puts-warn "Checked-in virtualenv conflict."
+    exit 1;
   fi
 fi
 
+##############################################
+# Restore cache.                             #
+##############################################
 
-if [ ! "$SKIP_INSTALL" ]; then
-  puts-step "Preparing Python runtime ($PYTHON_VERSION)"
-  curl http://envy-versions.s3.amazonaws.com/$PYTHON_VERSION.tar.bz2 -s | tar jx &> /dev/null
-  if [[ $? != 0 ]] ; then
-    puts-warn "Requested runtime ($PYTHON_VERSION) was not found."
-    puts-warn "Aborting.  More info: https://devcenter.heroku.com/articles/python-support"
-    exit 1
-  fi
-  mv python .heroku/python
+if [ ! -n "$EMPTYCACHE" ]; then
+  puts-step "Restoring cache from $CACHE_DIR."
 
-  # Record for future reference.
-  echo $PYTHON_VERSION > .heroku/python-version
-  FRESH_PYTHON=true
-
-  hash -r
+  for dir in $CACHED_DIRS; do
+    cp -R $CACHE_DIR/$dir . &> /dev/null || true
+  done
 else
-  puts-step "Using Python runtime ($PYTHON_VERSION)"
+  puts-step "Ignoring cache (EMPTYCACHE=$EMPTYCACHE)."
+  rm -rf $CACHE_DIR
 fi
 
-# If Pip isn't up to date:
-if [ "$FRESH_PYTHON" ] || [[ ! $(pip --version) == *$PIP_VERSION* ]]; then
-  WORKING_DIR=$(pwd)
+##############################################
+# Create the virtualenv. Rebuild if corrupt. #
+##############################################
 
-  # Prepare it for the real world
-  puts-step "Installing Distribute ($DISTRIBUTE_VERSION)"
-  cd $ROOT_DIR/vendor/distribute-$DISTRIBUTE_VERSION/
-  python setup.py install &> /dev/null
-  cd $WORKING_DIR
+set +e
 
-  puts-step "Installing Pip ($PIP_VERSION)"
-  cd $ROOT_DIR/vendor/pip-$PIP_VERSION/
-  python setup.py install &> /dev/null
-  cd $WORKING_DIR
+puts-step "Creating virtualenv ($(virtualenv --version))."
+
+if [ -e $VIRTUALENV_LOC ]; then
+  puts-step "Using cached virtualenv."
+else
+  # Try to create the virtualenv.
+  OUT=$(virtualenv --never-download --prompt='(venv) ' $VIRTUALENV_LOC 2>&1)
+
+  # If there's an error, purge and recreate.
+  [ $? -ne 0 ] && {
+    puts-warn "virtualenv" "Virtualenv corrupt, rebuilding."
+
+    for dir in $VIRTUALENV_DIRS; do
+      rm -fr $dir &> /dev/null || true
+    done
+
+    OUT=$(virtualenv --never-download  --prompt='(venv) ' $VIRTUALENV_LOC)
+  }
+
+  #echo "$OUT" | indent
 fi
 
 set -e
-hash -r
 
-# Pylibmc support.
-# See [`bin/steps/pylibmc`](pylibmc.html).
-source $BIN_DIR/steps/pylibmc
+##############################################
+# Activate virtualenv.                       #
+##############################################
 
-# SciPy support.
+puts-step "Activating virtualenv."
+source $VIRTUALENV_LOC/bin/activate
+
+# In case we restored a cached virtualenv, we
+# need to remove the old venv/bin from our
+# PATH, since the /tmp/ directories change
+# every push. Otherwise, we won't be able to
+# find pip.
+
+export PATH=$PWD/$VIRTUALENV_LOC/bin:`echo $PATH | awk -v RS=: -v ORS=: '/tmp/ {next} {print}' | sed 's/:*$//'`
+
+
+##############################################
+# Compile specific dependencies before Pip.  #
+##############################################
+
 source $BIN_DIR/steps/scipy
 
-# Install Mercurial if it appears to be required.
+##############################################
+# Install Mercurial if needed.               #
+##############################################
+
 if (grep -Fiq "hg+" requirements.txt) then
-  /app/.heroku/python/bin/pip install --use-mirrors mercurial | cleanup | indent
+  puts-step "pip" "Installing Mercurial."
+  pip install --use-mirrors mercurial 2>&1 >/dev/null | pipe-warn 'pip'
 fi
 
-# Install dependencies with Pip.
-puts-step "Installing dependencies using Pip ($PIP_VERSION)"
-/app/.heroku/python/bin/pip install --use-mirrors -r requirements.txt --exists-action=w --src=./.heroku/src | cleanup | indent
+##############################################
+# Install Python dependencies with Pip.      #
+##############################################
 
-# Django collectstatic support.
-source $BIN_DIR/steps/collectstatic
+puts-step "pip" "Installing Python dependencies."
 
-# ### Finalize
-#
+# Prevent pip from trying to install packages we already installed manually.
+cat requirements.txt | grep -vie "numpy" -vie "scipy" > requirements2.txt
+pip install --use-mirrors -r requirements2.txt --src ./.heroku/src | indent
 
-# Set context environment variables.
-set-env PATH '$HOME/.heroku/python/bin:$PATH'
-set-env PYTHONUNBUFFERED true
-set-env PYTHONHOME /app/.heroku/python
-set-default-env LIBRARY_PATH /app/.heroku/vendor/lib
-set-default-env LD_LIBRARY_PATH /app/.heroku/vendor/lib
-set-default-env LANG en_US.UTF-8
-set-default-env PYTHONHASHSEED random
-set-default-env PYTHONPATH /app/
+##############################################
+# Django-specific.                           #
+##############################################
 
+if [ "$NAME" = "Python/Django" ] && ! [ "$DISABLE_INJECTION" ]; then
+  source $BIN_DIR/steps/django
+fi
 
-# Experimental post_compile hook.
-source $BIN_DIR/steps/hooks/post_compile
+##############################################
+# Make virtualenv paths relative.            #
+##############################################
 
-# Store new artifacts in cache.
+set +e
+
+OUT=$(virtualenv --relocatable $VIRTUALENV_LOC)
+[ $? -ne 0 ] && {
+  puts-warn "Error making virtualenv relocatable"
+  echo "$OUT" | pipe-warn
+  exit 1
+}
+
+set -e
+
+##############################################
+# Store everything in the cache.             #
+##############################################
+
+puts-step "Updating cache."
+
 for dir in $CACHED_DIRS; do
   rm -rf $CACHE_DIR/$dir
   cp -R $dir $CACHE_DIR/
 done
 
-# ### Fin.
-
-deep-mv $BUILD_DIR $ORIG_BUILD_DIR
-deep-mv $TMP_APP_DIR $APP_DIR
+# Remove vendor dir after caching to reduce slug size.
+rm -rf $VENDOR_DIR
